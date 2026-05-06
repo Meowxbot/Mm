@@ -1,298 +1,212 @@
-import asyncio
-import os
-from datetime import datetime, timedelta
-from typing import Union
+# Copyright (c) 2025 AnonymousX1025
+# Licensed under the MIT License.
+# This file is part of AnonXMusic
 
-from ntgcalls import ConnectionNotFound, TelegramServerError
-from pyrogram import Client
-from pyrogram.types import InlineKeyboardMarkup
+
+from ntgcalls import (ConnectionNotFound, TelegramServerError,
+                      RTMPStreamingUnsupported, ConnectionError)
+from pyrogram.errors import (ChatSendMediaForbidden, ChatSendPhotosForbidden,
+                             MessageIdInvalid)
+from pyrogram.types import InputMediaPhoto, Message
 from pytgcalls import PyTgCalls, exceptions, types
+from pytgcalls.pytgcalls_session import PyTgCallsSession
+
+from anony import (app, config, db, lang, logger,
+                   queue, thumb, userbot, yt)
+from anony.helpers import Media, Track, buttons
 
 
-import config
-from AnonXMusic import LOGGER, YouTube, app
-from AnonXMusic.misc import db
-from AnonXMusic.utils.database import (
-    add_active_chat,
-    add_active_video_chat,
-    get_lang,
-    get_loop,
-    group_assistant,
-    is_autoend,
-    music_on,
-    remove_active_chat,
-    remove_active_video_chat,
-    set_loop,
-)
-from AnonXMusic.utils.exceptions import AssistantErr
-from AnonXMusic.utils.formatters import check_duration, seconds_to_min, speed_converter
-from AnonXMusic.utils.inline.play import stream_markup
-from AnonXMusic.utils.stream.autoclear import auto_clean
-from AnonXMusic.utils.thumbnails import get_thumb
-from strings import get_string
-
-autoend = {}
-counter = {}
-
-
-async def _clear_(chat_id):
-    db[chat_id] = []
-    await remove_active_video_chat(chat_id)
-    await remove_active_chat(chat_id)
-
-
-class Call(PyTgCalls):
+class TgCall(PyTgCalls):
     def __init__(self):
         self.clients = []
-        self.userbot1 = Client(
-            name="AnonXAss1",
-            api_id=config.API_ID,
-            api_hash=config.API_HASH,
-            session_string=str(config.STRING1),
-        )
-        self.one = PyTgCalls(
-            self.userbot1,
-            cache_duration=100,
-        )
-        self.userbot2 = Client(
-            name="AnonXAss2",
-            api_id=config.API_ID,
-            api_hash=config.API_HASH,
-            session_string=str(config.STRING2),
-        )
-        self.two = PyTgCalls(
-            self.userbot2,
-            cache_duration=100,
-        )
-        self.userbot3 = Client(
-            name="AnonXAss3",
-            api_id=config.API_ID,
-            api_hash=config.API_HASH,
-            session_string=str(config.STRING3),
-        )
-        self.three = PyTgCalls(
-            self.userbot3,
-            cache_duration=100,
-        )
-        self.userbot4 = Client(
-            name="AnonXAss4",
-            api_id=config.API_ID,
-            api_hash=config.API_HASH,
-            session_string=str(config.STRING4),
-        )
-        self.four = PyTgCalls(
-            self.userbot4,
-            cache_duration=100,
-        )
-        self.userbot5 = Client(
-            name="AnonXAss5",
-            api_id=config.API_ID,
-            api_hash=config.API_HASH,
-            session_string=str(config.STRING5),
-        )
-        self.five = PyTgCalls(
-            self.userbot5,
-            cache_duration=100,
-        )
 
-    async def pause_stream(self, chat_id: int):
-        assistant = await group_assistant(self, chat_id)
-        await assistant.pause(chat_id)
+    async def pause(self, chat_id: int) -> bool:
+        client = await db.get_assistant(chat_id)
+        await db.playing(chat_id, paused=True)
+        return await client.pause(chat_id)
 
-    async def resume_stream(self, chat_id: int):
-        assistant = await group_assistant(self, chat_id)
-        await assistant.resume(chat_id)
+    async def resume(self, chat_id: int) -> bool:
+        client = await db.get_assistant(chat_id)
+        await db.playing(chat_id, paused=False)
+        return await client.resume(chat_id)
 
-    async def stop_stream(self, chat_id: int):
-        assistant = await group_assistant(self, chat_id)
+    async def stop(self, chat_id: int) -> None:
+        client = await db.get_assistant(chat_id)
+        queue.clear(chat_id)
+        await db.remove_call(chat_id)
+        await db.set_loop(chat_id, 0)
+
         try:
-            await _clear_(chat_id)
-            await assistant.leave_call(chat_id)
-        except:
+            await client.leave_call(chat_id, close=False)
+        except Exception:
             pass
 
-    async def stop_stream_force(self, chat_id: int):
-        for client in self.clients:
-            try:
-                await client.leave_call(chat_id)
-            except:
-                pass
-        try:
-            await _clear_(chat_id)
-        except:
-            pass
 
-    async def speedup_stream(self, chat_id: int, file_path, speed, playing):
-        assistant = await group_assistant(self, chat_id)
-        if str(speed) != str("1.0"):
-            base = os.path.basename(file_path)
-            chatdir = os.path.join(os.getcwd(), "playback", str(speed))
-            if not os.path.isdir(chatdir):
-                os.makedirs(chatdir)
-            out = os.path.join(chatdir, base)
-            if not os.path.isfile(out):
-                if str(speed) == str("0.5"):
-                    vs = 2.0
-                if str(speed) == str("0.75"):
-                    vs = 1.35
-                if str(speed) == str("1.5"):
-                    vs = 0.68
-                if str(speed) == str("2.0"):
-                    vs = 0.5
-                proc = await asyncio.create_subprocess_shell(
-                    cmd=(
-                        "ffmpeg "
-                        "-i "
-                        f"{file_path} "
-                        "-filter:v "
-                        f"setpts={vs}*PTS "
-                        "-filter:a "
-                        f"atempo={speed} "
-                        f"{out}"
-                    ),
-                    stdin=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
+    async def play_media(
+        self,
+        chat_id: int,
+        message: Message,
+        media: Media | Track,
+        seek_time: int = 0,
+    ) -> None:
+        client = await db.get_assistant(chat_id)
+        _lang = await lang.get_lang(chat_id)
+        _thumb = (
+            await thumb.generate(media)
+            if isinstance(media, Track)
+            else config.DEFAULT_THUMB
+        ) if config.THUMB_GEN else None
+
+        if not media.file_path:
+            await message.edit_text(_lang["error_no_file"].format(config.SUPPORT_CHAT))
+            return await self.play_next(chat_id)
+
+        stream = types.MediaStream(
+            media_path=media.file_path,
+            audio_parameters=types.AudioQuality.HIGH,
+            video_parameters=types.VideoQuality.HD_720p,
+            audio_flags=types.MediaStream.Flags.REQUIRED,
+            video_flags=(
+                types.MediaStream.Flags.AUTO_DETECT
+                if media.video
+                else types.MediaStream.Flags.IGNORE
+            ),
+            ffmpeg_parameters=f"-ss {seek_time}" if seek_time > 1 else None,
+        )
+        try:
+            await client.play(
+                chat_id=chat_id,
+                stream=stream,
+                config=types.GroupCallConfig(auto_start=False),
+            )
+            if not seek_time:
+                media.time = 1
+                await db.add_call(chat_id)
+                text = _lang["play_media"].format(
+                    media.url,
+                    media.title,
+                    media.duration,
+                    media.user,
                 )
-                await proc.communicate()
-            else:
-                pass
-        else:
-            out = file_path
-        dur = await asyncio.get_event_loop().run_in_executor(None, check_duration, out)
-        dur = int(dur)
-        played, con_seconds = speed_converter(playing[0]["played"], speed)
-        duration = seconds_to_min(dur)
-        stream = types.MediaStream(
-            media_path=out,
-            audio_parameters=types.AudioQuality.HIGH,
-            video_parameters=types.VideoQuality.HD_720p,
-            audio_flags=types.MediaStream.Flags.REQUIRED,
-            video_flags=(
-                types.MediaStream.Flags.AUTO_DETECT
-                if playing[0]["streamtype"] == "video"
-                else types.MediaStream.Flags.IGNORE
-            ),
-            ffmpeg_parameters=f"-ss {played} -to {duration}",
-        )
-        if str(db[chat_id][0]["file"]) == str(file_path):
-            await assistant.play(chat_id, stream, config=types.GroupCallConfig(auto_start=False))
-        else:
-            raise AssistantErr("Umm")
-        if str(db[chat_id][0]["file"]) == str(file_path):
-            exis = (playing[0]).get("old_dur")
-            if not exis:
-                db[chat_id][0]["old_dur"] = db[chat_id][0]["dur"]
-                db[chat_id][0]["old_second"] = db[chat_id][0]["seconds"]
-            db[chat_id][0]["played"] = con_seconds
-            db[chat_id][0]["dur"] = duration
-            db[chat_id][0]["seconds"] = dur
-            db[chat_id][0]["speed_path"] = out
-            db[chat_id][0]["speed"] = speed
-
-    async def force_stop_stream(self, chat_id: int):
-        assistant = await group_assistant(self, chat_id)
-        try:
-            check = db.get(chat_id)
-            check.pop(0)
-        except:
-            pass
-        await remove_active_video_chat(chat_id)
-        await remove_active_chat(chat_id)
-        try:
-            await assistant.leave_call(chat_id, close=False)
-        except:
-            pass
-
-    async def skip_stream(
-        self,
-        chat_id: int,
-        link: str,
-        video: Union[bool, str] = None,
-        image: Union[bool, str] = None,
-    ):
-        assistant = await group_assistant(self, chat_id)
-        stream = types.MediaStream(
-            media_path=link,
-            audio_parameters=types.AudioQuality.HIGH,
-            video_parameters=types.VideoQuality.HD_720p,
-            audio_flags=types.MediaStream.Flags.REQUIRED,
-            video_flags=(
-                types.MediaStream.Flags.AUTO_DETECT
-                if video
-                else types.MediaStream.Flags.IGNORE
-            ),
-        )
-        await assistant.play(
-            chat_id,
-            stream,
-            config=types.GroupCallConfig(auto_start=False),
-        )
-
-    async def seek_stream(self, chat_id, file_path, to_seek, duration, mode):
-        assistant = await group_assistant(self, chat_id)
-        stream = types.MediaStream(
-            media_path=file_path,
-            audio_parameters=types.AudioQuality.HIGH,
-            video_parameters=types.VideoQuality.HD_720p,
-            audio_flags=types.MediaStream.Flags.REQUIRED,
-            video_flags=(
-                types.MediaStream.Flags.AUTO_DETECT
-                if mode == "video"
-                else types.MediaStream.Flags.IGNORE
-            ),
-            ffmpeg_parameters=f"-ss {to_seek} -to {duration}",
-        )
-        await assistant.play(chat_id, stream, config=types.GroupCallConfig(auto_start=False))
-
-    async def stream_call(self, link):
-        assistant = await group_assistant(self, config.LOGGER_ID)
-        stream = types.MediaStream(
-            media_path=link,
-            audio_parameters=types.AudioQuality.HIGH,
-            video_parameters=types.VideoQuality.HD_720p,
-            audio_flags=types.MediaStream.Flags.REQUIRED,
-        )
-        await assistant.play(
-            config.LOGGER_ID,
-            stream,
-            config=types.GroupCallConfig(auto_start=False),
-        )
-        await asyncio.sleep(0.2)
-        await assistant.leave_call(config.LOGGER_ID)
-
-    async def join_call(
-        self,
-        chat_id: int,
-        original_chat_id: int,
-        link,
-        video: Union[bool, str] = None,
-        image: Union[bool, str] = None,
-    ):
-        assistant = await group_assistant(self, chat_id)
-        language = await get_lang(chat_id)
-        _ = get_string(language)
-        stream = types.MediaStream(
-            media_path=link,
-            audio_parameters=types.AudioQuality.HIGH,
-            video_parameters=types.VideoQuality.HD_720p,
-            audio_flags=types.MediaStream.Flags.REQUIRED,
-            video_flags=(
-                types.MediaStream.Flags.AUTO_DETECT
-                if video
-                else types.MediaStream.Flags.IGNORE
-            ),
-        )
-        try:
-            await assistant.play(chat_id, stream, config=types.GroupCallConfig(auto_start=False))
+                keyboard = buttons.controls(chat_id)
+                try:
+                    if _thumb:
+                        await message.edit_media(
+                            media=InputMediaPhoto(
+                                media=_thumb,
+                                caption=text,
+                                has_spoiler=True,
+                            ),
+                            reply_markup=keyboard,
+                        )
+                    else:
+                        await message.edit_text(text, reply_markup=keyboard)
+                except (ChatSendMediaForbidden, ChatSendPhotosForbidden, MessageIdInvalid):
+                    if _thumb:
+                        sent = await app.send_photo(
+                            chat_id=chat_id,
+                            photo=_thumb,
+                            caption=text,
+                            has_spoiler=True,
+                            reply_markup=keyboard,
+                        )
+                    else:
+                        sent = await app.send_message(
+                            chat_id=chat_id,
+                            text=text,
+                            reply_markup=keyboard,
+                        )
+                    media.message_id = sent.id
+        except FileNotFoundError:
+            await message.edit_text(_lang["error_no_file"].format(config.SUPPORT_CHAT))
+            await self.play_next(chat_id)
         except exceptions.NoActiveGroupCall:
-            raise AssistantErr(_["call_8"])
-        except (ConnectionNotFound, TelegramServerError):
-            raise AssistantErr(_["call_10"])
-        await add_active_chat(chat_id)
-        await music_on(chat_id)
-        if video:
-            await add_active_video_chat(chat_id)
-        if await is_autoend():
+            await self.stop(chat_id)
+            await message.edit_text(_lang["error_no_call"])
+        except exceptions.NoAudioSourceFound:
+            await message.edit_text(_lang["error_no_audio"])
+            await self.play_next(chat_id)
+        except (ConnectionError, ConnectionNotFound, TelegramServerError):
+            await self.stop(chat_id)
+            await message.edit_text(_lang["error_tg_server"])
+        except RTMPStreamingUnsupported:
+            await self.stop(chat_id)
+            await message.edit_text(_lang["error_rtmp"])
+
+
+    async def replay(self, chat_id: int) -> None:
+        if not await db.get_call(chat_id):
+            return
+
+        media = queue.get_current(chat_id)
+        _lang = await lang.get_lang(chat_id)
+        msg = await app.send_message(chat_id=chat_id, text=_lang["play_again"])
+        media.message_id = msg.id
+        await self.play_media(chat_id, msg, media)
+
+
+    async def play_next(self, chat_id: int) -> None:
+        if loop := await db.get_loop(chat_id):
+            await db.set_loop(chat_id, loop - 1)
+            return await self.replay(chat_id)
+
+        media = queue.get_next(chat_id)
+        try:
+            if media.message_id:
+                await app.delete_messages(
+                    chat_id=chat_id,
+                    message_ids=media.message_id,
+                    revoke=True,
+                )
+                media.message_id = 0
+        except Exception:
+            pass
+
+        if not media:
+            return await self.stop(chat_id)
+
+        _lang = await lang.get_lang(chat_id)
+        msg = await app.send_message(chat_id=chat_id, text=_lang["play_next"])
+        if not media.file_path:
+            media.file_path = await yt.download(media.id, video=media.video)
+            if not media.file_path:
+                await self.play_next(chat_id)
+                return await msg.edit_text(
+                    _lang["error_no_file"].format(config.SUPPORT_CHAT)
+                )
+
+        media.message_id = msg.id
+        await self.play_media(chat_id, msg, media)
+
+
+    async def ping(self) -> float:
+        pings = [client.ping for client in self.clients]
+        return round(sum(pings) / len(pings), 2)
+
+
+    async def decorators(self, client: PyTgCalls) -> None:
+        @client.on_update()
+        async def update_handler(_, update: types.Update) -> None:
+            if isinstance(update, types.StreamEnded):
+                if update.stream_type == types.StreamEnded.Type.AUDIO:
+                    await self.play_next(update.chat_id)
+            elif isinstance(update, types.ChatUpdate):
+                if update.status in [
+                    types.ChatUpdate.Status.KICKED,
+                    types.ChatUpdate.Status.LEFT_GROUP,
+                    types.ChatUpdate.Status.CLOSED_VOICE_CHAT,
+                ]:
+                    await self.stop(update.chat_id)
+
+
+    async def boot(self) -> None:
+        PyTgCallsSession.notice_displayed = True
+        for ub in userbot.clients:
+            client = PyTgCalls(ub, cache_duration=100)
+            await client.start()
+            self.clients.append(client)
+            await self.decorators(client)
+        logger.info("PyTgCalls client(s) started.")():
             counter[chat_id] = {}
             users = len(await assistant.get_participants(chat_id))
             if users == 1:
