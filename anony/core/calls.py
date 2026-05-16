@@ -34,7 +34,7 @@ class TgCall(PyTgCalls):
         client = await db.get_assistant(chat_id)
         queue.clear(chat_id)
         await db.remove_call(chat_id)
-        await db.set_autoplay(chat_id, False)
+        await db.set_loop(chat_id, 0)
 
         try:
             await client.leave_call(chat_id, close=False)
@@ -162,18 +162,8 @@ class TgCall(PyTgCalls):
         except Exception:
             pass
 
-        autoplay = await db.is_autoplay(chat_id)
-        _lang = await lang.get_lang(chat_id)
-        if not media and not autoplay:
+        if not media:
             return await self.stop(chat_id)
-                                 elif autoplay and not media:
-            if not isinstance(curr, Track):
-                return await self.stop(chat_id)
-            media = await yt.get_next(curr.id)
-            if not media:
-                return await self.stop(chat_id)
-            media.user = _lang["autoplay"]
-            queue.force_add(chat_id, media)
 
         _lang = await lang.get_lang(chat_id)
         msg = await app.send_message(chat_id=chat_id, text=_lang["play_next"])
