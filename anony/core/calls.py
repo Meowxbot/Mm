@@ -164,7 +164,7 @@ class TgCall(PyTgCalls):
 
         autoplay = await db.is_autoplay(chat_id)
         _lang = await lang.get_lang(chat_id)
-        if not media and not autoplay
+        if not media and not autoplay:
             return await self.stop(chat_id)
                                  elif autoplay and not media:
             if not isinstance(curr, Track):
